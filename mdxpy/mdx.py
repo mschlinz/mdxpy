@@ -3,6 +3,8 @@ from typing import List, Optional, Union
 
 from ordered_set import OrderedSet
 
+import os
+
 ELEMENT_ATTRIBUTE_PREFIX = "}ELEMENTATTRIBUTES_"
 
 
@@ -142,6 +144,12 @@ class MdxHierarchySet:
     def to_mdx(self) -> str:
         pass
 
+    def to_clipboard(self):
+        mdx = self.to_mdx()
+        command = 'echo | set /p nul="' + mdx + '"| clip'
+        os.system(command)
+        print(mdx)
+
     @staticmethod
     def tm1_subset_all(dimension: str, hierarchy: str = None) -> 'MdxHierarchySet':
         return Tm1SubsetAllHierarchySet(dimension, hierarchy)
@@ -233,8 +241,8 @@ class MdxHierarchySet:
     def from_str(dimension: str, hierarchy: str, mdx: str):
         return StrHierarchySet(dimension, hierarchy, mdx)
 
-    def filter_by_attribute(self, attribute_name: str, attribute_values: List) -> 'MdxHierarchySet':
-        return FilterByAttributeHierarchySet(self, attribute_name, attribute_values)
+    def filter_by_attribute(self, attribute_name: str, attribute_values: List, operator:Optional[str] = '=') -> 'MdxHierarchySet':
+        return FilterByAttributeHierarchySet(self, attribute_name, attribute_values, operator)
 
     def filter_by_pattern(self, wildcard: str) -> 'MdxHierarchySet':
         return Tm1FilterByPattern(self, wildcard)
@@ -279,6 +287,9 @@ class MdxHierarchySet:
 
     def order(self, cube, mdx_tuple) -> 'MdxHierarchySet':
         return OrderByCellValueHierarchySet(self, cube, mdx_tuple)
+
+    def order_by_attribute(self, attribute_name: str, flag: Optional[str] = 'BASC') -> 'MdxHierarchySet':
+        return OrderByAttributeValueHierarchySet(self, attribute_name, flag)
 
     def generate_attribute_to_member(self, attribute: str, dimension: str, hierarchy: str = None):
         return GenerateAttributeToMemberSet(self, attribute, dimension, hierarchy)
@@ -455,7 +466,7 @@ class Tm1SubsetToSetHierarchySet(MdxHierarchySet):
         self.subset = subset
 
     def to_mdx(self) -> str:
-        return f"{{TM1SUBSETTOSET([{self.dimension}].[{self.hierarchy}],'{self.subset}')}}"
+        return f'{{TM1SUBSETTOSET([{self.dimension}].[{self.hierarchy}],"{self.subset}")}}'
 
 
 class StrHierarchySet(MdxHierarchySet):
@@ -470,22 +481,23 @@ class StrHierarchySet(MdxHierarchySet):
 
 class FilterByAttributeHierarchySet(MdxHierarchySet):
 
-    def __init__(self, underlying_hierarchy_set: MdxHierarchySet, attribute_name: str, attribute_values: List[str]):
+    def __init__(self, underlying_hierarchy_set: MdxHierarchySet, attribute_name: str, attribute_values: List[str], operator: str = '='):
         super(FilterByAttributeHierarchySet, self).__init__(underlying_hierarchy_set.dimension,
                                                             underlying_hierarchy_set.hierarchy)
         self.underlying_hierarchy_set = underlying_hierarchy_set
         self.attribute_name = attribute_name
         self.attribute_values = attribute_values
+        self.operator = operator
 
     def to_mdx(self) -> str:
         element_attribute_cube = ELEMENT_ATTRIBUTE_PREFIX + self.dimension
 
-        adjusted_values = [f"'{value}'" if isinstance(value, str) else str(value)
+        adjusted_values = [f'"{value}"' if isinstance(value, str) else str(value)
                            for value
                            in self.attribute_values]
 
         mdx_filter = " OR ".join(
-            f"[{element_attribute_cube}].([{element_attribute_cube}].[{self.attribute_name}])={value}"
+            f"[{element_attribute_cube}].([{element_attribute_cube}].[{self.attribute_name}]){self.operator}{value}"
             for value
             in adjusted_values)
 
@@ -564,6 +576,18 @@ class OrderByCellValueHierarchySet(MdxHierarchySet):
 
     def to_mdx(self) -> str:
         return f"{{ORDER({self.underlying_hierarchy_set.to_mdx()},[{self.cube}].{self.mdx_tuple.to_mdx()})}}"
+
+class OrderByAttributeValueHierarchySet(MdxHierarchySet):
+
+    def __init__(self, underlying_hierarchy_set: MdxHierarchySet, attribute_name: str, flag: str = 'BASC'):
+        super(OrderByAttributeValueHierarchySet, self).__init__(underlying_hierarchy_set.dimension,
+                                                           underlying_hierarchy_set.hierarchy)
+        self.underlying_hierarchy_set = underlying_hierarchy_set
+        self.attribute_name = normalize(attribute_name)
+        self.flag = normalize(flag)
+
+    def to_mdx(self) -> str:
+        return f"{{ORDER({self.underlying_hierarchy_set.to_mdx()},[{self.underlying_hierarchy_set.dimension}].[{self.underlying_hierarchy_set.hierarchy}].CURRENTMEMBER.PROPERTIES(\"{self.attribute_name}\"), {self.flag})}}"
 
 
 class Tm1SortHierarchySet(MdxHierarchySet):
@@ -717,14 +741,14 @@ class MdxAxis:
     def is_empty(self) -> bool:
         return not self.dim_sets and not self.tuples
 
-    def set_non_empty(self, non_empty=True):
+    def set_non_empty(self, non_empty: bool = True):
         self.non_empty = non_empty
 
-    def to_mdx(self) -> str:
+    def to_mdx(self, tm1_ignore_bad_tuples=False) -> str:
         if self.is_empty():
             return "{}"
 
-        return f"""{"NON EMPTY " if self.non_empty else ""}{self.dim_sets_to_mdx() if self.dim_sets else self.tuples_to_mdx()}"""
+        return f"""{"NON EMPTY " if self.non_empty else ""}{"TM1IGNORE_BADTUPLES " if tm1_ignore_bad_tuples else ""}{self.dim_sets_to_mdx() if self.dim_sets else self.tuples_to_mdx()}"""
 
     def dim_sets_to_mdx(self) -> str:
         return " * ".join(dim_set.to_mdx() for dim_set in self.dim_sets)
@@ -739,6 +763,7 @@ class MdxBuilder:
         self.axes = {0: MdxAxis.empty()}
         self._where = MdxTuple.empty()
         self.calculated_members = list()
+        self._tm1_ignore_bad_tuples = False
 
     @staticmethod
     def from_cube(cube: str) -> 'MdxBuilder':
@@ -749,16 +774,20 @@ class MdxBuilder:
         return self
 
     def columns_non_empty(self) -> 'MdxBuilder':
-        return self.axis_non_empty(0)
+        return self.non_empty(0)
 
     def rows_non_empty(self) -> 'MdxBuilder':
-        return self.axis_non_empty(1)
+        return self.non_empty(1)
 
-    def axis_non_empty(self, axis: int) -> 'MdxBuilder':
+    def non_empty(self, axis: int) -> 'MdxBuilder':
         if axis not in self.axes:
             self.axes[axis] = MdxAxis.empty()
 
         self.axes[axis].set_non_empty()
+        return self
+
+    def tm1_ignore_bad_tuples(self, ignore=True) -> 'MdxBuilder':
+        self._tm1_ignore_bad_tuples = ignore
         return self
 
     def _add_tuple_to_axis(self, axis: MdxAxis, *args: Union[str, Member]) -> 'MdxBuilder':
@@ -810,10 +839,18 @@ class MdxBuilder:
             in self.calculated_members) + "\r\n"
 
         mdx_axes = ",\r\n".join(
-            f"{'' if axis.is_empty() else (axis.to_mdx() + ' ON ' + str(position))}"
+            f"{'' if axis.is_empty() else (axis.to_mdx(self._tm1_ignore_bad_tuples) + ' ON ' + str(position))}"
             for position, axis
             in self.axes.items())
 
         mdx_where = "\r\nWHERE " + self._where.to_mdx() if not self._where.is_empty() else ""
 
         return f"""{mdx_with if self.calculated_members else ""}SELECT\r\n{mdx_axes}\r\nFROM [{self.cube}]{mdx_where}"""
+
+    def to_clipboard(self):
+        mdx = self.to_mdx()
+        mdx = mdx.replace('\r\n', ' ')
+        command = 'echo | set /p nul="' + mdx + '"| clip'
+        os.system(command)
+        print(mdx)
+        
